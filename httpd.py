@@ -2,10 +2,13 @@ import argparse
 import logging
 import multiprocessing
 import os
+import io
 
 from threading import Thread
+from urllib.parse import unquote_plus
 from socketserver import TCPServer, StreamRequestHandler
 from functools import partial
+
 from constants import HttpCode
 
 HOST = 'localhost'
@@ -31,8 +34,7 @@ class OtusRequestHandler(StreamRequestHandler):
             method()
         else:
             logging.info('Unknown method: %s', self.method)
-            self.send_response_header(*HttpCode.METHOD_NOT_ALLOWED)
-            self.end_headers()
+            self.send_error(*HttpCode.METHOD_NOT_ALLOWED)
 
     def parse_request(self):
         request_line = str(self.rfile.readline(), 'utf8')
@@ -42,6 +44,8 @@ class OtusRequestHandler(StreamRequestHandler):
             self.method, self.path, self.protocol = parts
         elif len(parts) == 2:
             self.method, self.path = parts
+        else:
+            logging.info('Invalid request header')
 
         # Parse request headers
         while True:
@@ -53,7 +57,26 @@ class OtusRequestHandler(StreamRequestHandler):
             name, body = decoded_header_line.split(': ')
             self.headers[name] = body
 
+    def convert_path(self, path=None):
+        """
+        Converts url path to local filesystem path.
+        Reads url path from self.path variable
+        """
+        if path is None:
+            path = self.path
+        path = path.split('?', 1)[0]
+        path = unquote_plus(path)
+        path = path.strip('/')
+        full_path = os.path.join(self.document_root, path)
+        if not os.path.exists(full_path):
+            return
+        return full_path
+
     def send_response_header(self, code, msg):
+        """
+        Adds first line in HTTP response in format:
+        `protocol version` `http code` `http message`
+        """
         response_header_str = "{protocol} {code} {msg}\r\n".format(
             protocol=self.protocol,
             code=code,
@@ -68,19 +91,61 @@ class OtusRequestHandler(StreamRequestHandler):
     def end_headers(self):
         self.wfile.write(b"\r\n")
 
-    def parse_path(self):
+    def send_error(self, code, status):
+        self.send_response_header(code, status)
+        self.send_header("Server", self.server_version)
+        self.send_header("Connection", "close")
+        self.end_headers()
+
+    def list_directory(self, dir_path):
+        # if dir_path.endswith("index.html"):
+        #     # get index.html as default dir file
+        #     pass
+        try:
+            dir_list = os.listdir(dir_path)
+            if "index.html" in dir_list:
+                # get index.html as default dir file
+                pass
+        except OSError:
+            self.send_error(*HttpCode.NOT_FOUND)
+            return
+
+        response_str = "Listing of directory:\n"
+
+    def retrieve_file(self, file_path):
         pass
 
-    def list_directory(self):
+    def guess_contenttype(self, file_path, extensions_map=None):
         pass
 
     def get(self):
         logging.info('Processing GET request: {}'.format(self.path))
+        converted_path = self.convert_path()
+        response_content = ""
+
+        if converted_path is None:
+            self.send_error(*HttpCode.NOT_FOUND)
+            return
+        elif os.path.isdir(converted_path):
+            response_content = self.list_directory(converted_path)
+        elif os.path.isfile(converted_path):
+            pass
+        else:
+            self.send_error(*HttpCode.FORBIDDEN)
+            return
+
+        if response_content is not None:
+            pass
+
         self.send_response_header(*HttpCode.OK)
         self.send_header("Server", self.server_version)
         self.send_header("Content-Type", "text/plain")
+        self.send_header("Content‐Length", len(response_content))
         self.send_header("Connection", "close")
         self.end_headers()
+        # write response content
+        response_bytes = io.BytesIO(b"Hello")
+        self.wfile.write(response_bytes.read())
 
     def head(self):
         logging.info('Processing HEAD request: {}'.format(self.path))
