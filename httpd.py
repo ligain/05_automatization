@@ -8,7 +8,6 @@ from threading import Thread
 from urllib.parse import unquote_plus
 from socketserver import TCPServer, StreamRequestHandler
 from functools import partial
-from string import Template
 
 
 HOST = 'localhost'
@@ -23,7 +22,7 @@ class HttpCode:
 
 
 class OtusRequestHandler(StreamRequestHandler):
-    server_version = 'Otus server/0.1'
+    server_version = 'OTUS server/0.1'
 
     def __init__(self, *args, document_root=None, **kwargs):
         self.document_root = document_root
@@ -73,6 +72,7 @@ class OtusRequestHandler(StreamRequestHandler):
             path = self.path
         path = path.split('?', 1)[0]
         path = unquote_plus(path)
+        path = os.path.normpath(path)
         path = path.strip('/')
         full_path = os.path.join(self.document_root, path)
         if not os.path.exists(full_path):
@@ -91,14 +91,13 @@ class OtusRequestHandler(StreamRequestHandler):
         )
         self.wfile.write(response_header_str.encode("latin-1"))
 
-    def send_response_content(self, content, ctype):
+    def send_headers(self, code, status, content_length, ctype):
+        self.send_response_header(code, status)
         self.send_header("Server", self.server_version)
         self.send_header("Content-Type", ctype)
-        self.send_header("Content-Length", len(content))
+        self.send_header("Content-Length", content_length)
         self.send_header("Connection", "close")
         self.end_headers()
-        # write response content
-        self.wfile.write(content)
 
     def send_header(self, key, value):
         header_str = "{}: {}\r\n".format(key, value)
@@ -114,25 +113,6 @@ class OtusRequestHandler(StreamRequestHandler):
         self.end_headers()
 
     def list_directory(self, dir_path):
-        logging.info('Getting contents of folder: {}'.format(dir_path))
-        dir_response_tmpl = Template("""
-        <!DOCTYPE html>
-        <html>
-           <head>
-              <meta charset="utf-8" />
-              <title>Directory listing</title>
-           </head>
-           <body>
-              <h1>Listing of directory $dirname :</h1>
-              <ul style="list-style-type: none;">
-                  <li><a href="$parent_link">./</a></li>
-                  $children
-              </ul>
-              <hr>
-              <i>Server: $server</i>
-           </body>
-        </html>
-        """)
         try:
             dir_list = os.listdir(dir_path)
         except OSError:
@@ -143,29 +123,11 @@ class OtusRequestHandler(StreamRequestHandler):
         if "index.html" in dir_list:
             # get index.html as default dir file
             full_index_path = os.path.join(dir_path, 'index.html')
-            self.retrieve_file(full_index_path)
-
-        if not dir_list:
-            # 404 error if empty directory
-            logging.info('Empty directory: {}'.format(dir_path))
+            return self.retrieve_file(full_index_path)
+        else:
+            logging.info('Try to get directory w/o index.html')
             self.send_error(*HttpCode.NOT_FOUND)
             return
-
-        parent = os.path.split(self.path.rstrip('/'))[0]
-        children = ''
-        for dir_item in dir_list:
-            children += '<li><a href="{item_link}">{item_name}</a></li>'.format(
-                item_link=os.path.join(self.path, dir_item),
-                item_name=dir_item
-            )
-        dir_response = dir_response_tmpl.substitute(
-            dirname=os.path.basename(dir_path),
-            parent_link=parent,
-            children=children,
-            server=self.server_version
-        )
-        self.send_response_header(*HttpCode.OK)
-        self.send_response_content(dir_response.encode(), "text/html")
 
     def retrieve_file(self, file_path):
         logging.info('Getting file: {}'.format(file_path))
@@ -181,26 +143,37 @@ class OtusRequestHandler(StreamRequestHandler):
             file_mime_type = "application/octet-stream"
 
         with file:
-            self.send_response_header(*HttpCode.OK)
-            self.send_response_content(file.read(), file_mime_type)
+            file_content = file.read()
+            self.send_headers(*HttpCode.OK, len(file_content), file_mime_type)
+            return file_content
+            # self.send_response_header(*HttpCode.OK)
+            # self.send_response_content(file.read(), file_mime_type)
 
-    def get(self):
-        logging.info('Processing GET request: {}'.format(self.path))
+    def process_get_and_head(self):
         converted_path = self.convert_path()
 
         if converted_path is None:
             self.send_error(*HttpCode.NOT_FOUND)
             return
         elif os.path.isdir(converted_path):
-            self.list_directory(converted_path)
+            content_bytes = self.list_directory(converted_path)
         elif os.path.isfile(converted_path):
-            self.retrieve_file(converted_path)
+            content_bytes = self.retrieve_file(converted_path)
         else:
             self.send_error(*HttpCode.FORBIDDEN)
             return
+        return content_bytes
+
+    def get(self):
+        logging.info('Processing GET request: {}'.format(self.path))
+        content_bytes = self.process_get_and_head()
+        if not content_bytes:
+            logging.error('Sending an empty response in GET request')
+        self.wfile.write(content_bytes)
 
     def head(self):
         logging.info('Processing HEAD request: {}'.format(self.path))
+        self.process_get_and_head()
 
 
 def run_server(serv):
