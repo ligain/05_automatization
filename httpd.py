@@ -175,6 +175,17 @@ class OtusRequestHandler:
 
     def retrieve_file(self, file_path):
         logging.info('Getting file: {}'.format(file_path))
+
+        if self.method.lower() == 'head':
+            if not os.path.exists(file_path):
+                logging.error('File not found in path: %s', file_path)
+                self.send_error(*HttpCode.NOT_FOUND)
+                return
+            file_mime_type, _ = mimetypes.guess_type(file_path)
+            file_len = os.path.getsize(file_path)
+            self.send_headers(*HttpCode.OK, file_len, file_mime_type)
+            return
+
         try:
             file = open(file_path, 'rb')
         except IOError:
