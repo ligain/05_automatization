@@ -10,13 +10,24 @@ from urllib.parse import unquote_plus
 
 HOST = 'localhost'
 PORT = 8080
+MAX_HEADER_LENGH = 65536
 
 
 class HttpCode:
     OK = (200, 'OK')
+    BAD_REQUEST = (400, 'Bad Request')
     FORBIDDEN = (403, 'Forbidden')
     NOT_FOUND = (404, 'Not Found')
     METHOD_NOT_ALLOWED = (405, 'Method Not Allowed')
+    HEADER_TOO_LARGE = (431, 'Request Header Fields Too Large')
+
+
+class HeaderTooLong(Exception):
+    pass
+
+
+class BadRequest(Exception):
+    pass
 
 
 class OtusRequestHandler:
@@ -37,7 +48,16 @@ class OtusRequestHandler:
 
     def handle(self):
         logging.info('Got connection from: %s', self.client_addr)
-        self.parse_request()
+        try:
+            self.parse_request()
+        except HeaderTooLong:
+            self.send_error(*HttpCode.HEADER_TOO_LARGE)
+            self.close_connection()
+            return
+        except BadRequest:
+            self.send_error(*HttpCode.BAD_REQUEST)
+            self.close_connection()
+            return
 
         if hasattr(self, self.method.lower()):
             method = getattr(self, self.method.lower())
@@ -52,7 +72,7 @@ class OtusRequestHandler:
         if not self.wfile.closed:
             try:
                 self.wfile.flush()
-            except socket.error:
+            except OSError:
                 logging.exception('Error while closing client connection:')
         self.wfile.close()
         self.rfile.close()
@@ -61,7 +81,9 @@ class OtusRequestHandler:
         self.client_sock.close()
 
     def parse_request(self):
-        request_line = str(self.rfile.readline(), 'utf8')
+        request_line = str(self.rfile.readline(), 'iso-8859-1')
+        if not request_line.endswith('\r\n'):
+            raise BadRequest
         raw_request = request_line.rstrip('\r\n')
         parts = raw_request.split()
         if len(parts) == 3:
@@ -69,14 +91,18 @@ class OtusRequestHandler:
         elif len(parts) == 2:
             self.method, self.path = parts
         else:
-            logging.info('Invalid request header')
+            logging.error('Invalid request header with parts: %s', parts)
+            raise BadRequest
 
         # Parse request headers
         while True:
             line = self.rfile.readline()
+            if len(line) > MAX_HEADER_LENGH:
+                logging.error('Header to large: %s', line)
+                raise HeaderTooLong
             if line in (b'\r\n', b'\n', b''):
                 break
-            decoded_header_line = line.decode('utf8')
+            decoded_header_line = line.decode('iso-8859-1')
             decoded_header_line = decoded_header_line.rstrip('\r\n')
             name, body = decoded_header_line.split(': ')
             self.headers[name] = body
